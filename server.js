@@ -1,21 +1,12 @@
 const WebSocket = require('ws');
 const crypto = require('crypto');
 
-// Создаём сервер на порту 8080
 const wss = new WebSocket.Server({ port: 8080 });
-
-// Хранилище пользователей
-const users = new Map(); // { userId: { password, socket, contacts } }
+const users = new Map();
 
 console.log('🔒 VeilChat Server started on ws://0.0.0.0:8080');
-console.log('📝 Features: encrypted messages, disappearing messages, WebRTC calls');
+console.log('📝 Features: messages, disappearing messages, WebRTC calls');
 
-// Генерация ID комнаты для звонка
-function generateRoomId() {
-  return crypto.randomBytes(16).toString('hex');
-}
-
-// Отправка сообщения пользователю
 function sendToUser(userId, data) {
   const user = users.get(userId);
   if (user && user.socket && user.socket.readyState === WebSocket.OPEN) {
@@ -25,11 +16,9 @@ function sendToUser(userId, data) {
   return false;
 }
 
-// Отправка статуса онлайн всем контактам
 function broadcastStatus(userId) {
   const user = users.get(userId);
   if (!user) return;
-
   user.contacts.forEach(contactNick => {
     sendToUser(contactNick, {
       type: 'status',
@@ -39,237 +28,93 @@ function broadcastStatus(userId) {
   });
 }
 
-wss.on('connection', (ws, req) => {
+wss.on('connection', (ws) => {
   let currentUserId = null;
-  let heartbeatInterval = null;
-
   console.log('📱 New client connected');
-
-  // Heartbeat для проверки живых соединений
-  ws.isAlive = true;
-  ws.on('pong', () => { ws.isAlive = true; });
-
-  heartbeatInterval = setInterval(() => {
-    if (ws.isAlive === false) {
-      if (currentUserId) {
-        console.log(`❌ User ${currentUserId} disconnected (timeout)`);
-        broadcastStatus(currentUserId);
-        const user = users.get(currentUserId);
-        if (user) user.socket = null;
-      }
-      return ws.terminate();
-    }
-    ws.isAlive = false;
-    ws.ping();
-  }, 30000);
 
   ws.on('message', (message) => {
     try {
       const data = JSON.parse(message);
-      console.log('📨 Received:', data.type, data);
+      console.log('📨 Received:', data.type);
 
-      // Регистрация пользователя
+      // Регистрация
       if (data.type === 'register') {
         const { userId, password } = data;
         
         if (!users.has(userId)) {
-          users.set(userId, {
-            password: password,
-            socket: ws,
-            contacts: []
-          });
-          console.log(`✅ New user registered: ${userId}`);
+          users.set(userId, { password, socket: ws, contacts: [] });
+          console.log(`✅ New user: ${userId}`);
         } else {
-          const existingUser = users.get(userId);
-          existingUser.socket = ws;
+          users.get(userId).socket = ws;
           console.log(`🔄 User reconnected: ${userId}`);
         }
-        
         currentUserId = userId;
         
-        // Отправляем подтверждение
-        ws.send(JSON.stringify({
-          type: 'registered',
-          success: true,
-          userId: userId
-        }));
-        
-        // Отправляем список контактов
-        const user = users.get(userId);
-        ws.send(JSON.stringify({
-          type: 'contacts_list',
-          contacts: user.contacts
-        }));
-        
-        // Уведомляем контакты о статусе
+        ws.send(JSON.stringify({ type: 'registered', success: true, userId: userId }));
+        ws.send(JSON.stringify({ type: 'contacts_list', contacts: users.get(userId).contacts }));
         broadcastStatus(userId);
       }
       
-      // Отправка сообщения
+      // Сообщение
       else if (data.type === 'message') {
         const { from, to, content, messageId } = data;
         const target = users.get(to);
         
-        if (target && target.socket && target.socket.readyState === WebSocket.OPEN) {
-          // Отправляем сообщение получателю
+        if (target && target.socket?.readyState === WebSocket.OPEN) {
           target.socket.send(JSON.stringify({
-            type: 'message',
-            from: from,
-            content: content,
-            messageId: messageId,
-            timestamp: Date.now()
+            type: 'message', from, content, messageId, timestamp: Date.now()
           }));
+          console.log(`📨 Message: ${from} → ${to}`);
           
-          // Отправляем подтверждение отправителю
-          const sender = users.get(from);
-          if (sender && sender.socket && sender.socket.readyState === WebSocket.OPEN) {
-            sender.socket.send(JSON.stringify({
-              type: 'message_delivered',
-              messageId: messageId,
-              to: to
-            }));
-          }
-          
-          console.log(`📨 Message from ${from} to ${to}: ${content.substring(0, 50)}`);
-          
-          // Планируем удаление сообщения через 60 секунд
           setTimeout(() => {
-            if (target.socket && target.socket.readyState === WebSocket.OPEN) {
-              target.socket.send(JSON.stringify({
-                type: 'delete_message',
-                messageId: messageId,
-                from: from
-              }));
-              console.log(`🗑️ Message ${messageId} deleted after 60 seconds`);
+            if (target.socket?.readyState === WebSocket.OPEN) {
+              target.socket.send(JSON.stringify({ type: 'delete_message', messageId }));
             }
           }, 60000);
-        } else {
-          // Пользователь не в сети
-          const sender = users.get(from);
-          if (sender && sender.socket && sender.socket.readyState === WebSocket.OPEN) {
-            sender.socket.send(JSON.stringify({
-              type: 'error',
-              message: `User ${to} is offline`
-            }));
-          }
         }
       }
       
-      // Добавление контакта
+      // Добавить контакт
       else if (data.type === 'add_contact') {
         const { userId, contactId } = data;
         const user = users.get(userId);
-        
         if (user && !user.contacts.includes(contactId)) {
           user.contacts.push(contactId);
           console.log(`📞 ${userId} added contact: ${contactId}`);
-          
-          // Отправляем статус нового контакта
-          const contact = users.get(contactId);
-          if (contact) {
-            ws.send(JSON.stringify({
-              type: 'status',
-              userId: contactId,
-              online: contact.socket?.readyState === WebSocket.OPEN || false
-            }));
-          }
-          
-          ws.send(JSON.stringify({
-            type: 'contact_added_success',
-            contact: contactId
-          }));
-          
-          // Уведомляем контакт о добавлении
-          sendToUser(contactId, {
-            type: 'contact_added',
-            by: userId
-          });
+          ws.send(JSON.stringify({ type: 'contact_added_success', contact: contactId }));
         }
       }
       
-      // ========== WebRTC ЗВОНКИ ==========
+      // === ЗВОНКИ ===
       
-      // Запрос на звонок
+      // Запрос звонка
       else if (data.type === 'call_request') {
         const { from, to } = data;
-        const target = users.get(to);
+        const roomId = crypto.randomBytes(8).toString('hex');
         
-        if (!target) {
-          sendToUser(from, {
-            type: 'error',
-            message: 'User not found'
-          });
-          return;
-        }
-        
-        if (!target.socket || target.socket.readyState !== WebSocket.OPEN) {
-          sendToUser(from, {
-            type: 'error',
-            message: 'User is offline'
-          });
-          return;
-        }
-        
-        const roomId = generateRoomId();
-        
-        // Отправляем запрос на звонок получателю
-        sendToUser(to, {
-          type: 'incoming_call',
-          from: from,
-          roomId: roomId
-        });
-        
-        // Отправляем инициатору ID комнаты
-        sendToUser(from, {
-          type: 'call_initialized',
-          roomId: roomId
-        });
-        
-        console.log(`📞 Call request from ${from} to ${to}, room: ${roomId}`);
+        sendToUser(to, { type: 'incoming_call', from: from, roomId: roomId });
+        sendToUser(from, { type: 'call_initialized', roomId: roomId });
+        console.log(`📞 Call: ${from} → ${to}, room: ${roomId}`);
       }
       
-      // WebRTC сигналинг (offer, answer, ice_candidate)
+      // WebRTC сигнал
       else if (data.type === 'webrtc_signal') {
         const { to, signal, roomId } = data;
-        
-        // Пересылаем сигнал получателю
-        sendToUser(to, {
-          type: 'webrtc_signal',
-          from: currentUserId,
-          signal: signal,
-          roomId: roomId
-        });
-        
-        console.log(`🔄 WebRTC signal from ${currentUserId} to ${to}: ${data.signal?.type || 'unknown'}`);
+        sendToUser(to, { type: 'webrtc_signal', from: currentUserId, signal, roomId });
       }
       
-      // Завершение звонка
+      // Завершить звонок
       else if (data.type === 'end_call') {
         const { roomId } = data;
-        
-        // Уведомляем собеседника о завершении звонка
-        // Для простоты, мы не храним комнаты, просто пересылаем
-        // В реальном приложении нужно хранить участников комнаты
-        
-        console.log(`📞 Call ended for room: ${roomId}`);
-      }
-      
-      else {
-        console.log('Unknown message type:', data.type);
+        console.log(`📞 Call ended: ${roomId}`);
       }
       
     } catch (e) {
-      console.error('Error parsing message:', e);
-      ws.send(JSON.stringify({ 
-        type: 'error', 
-        message: 'Invalid message format' 
-      }));
+      console.error('Error:', e);
     }
   });
 
   ws.on('close', () => {
-    if (heartbeatInterval) clearInterval(heartbeatInterval);
-    
     if (currentUserId) {
       console.log(`👋 User disconnected: ${currentUserId}`);
       const user = users.get(currentUserId);
@@ -279,5 +124,5 @@ wss.on('connection', (ws, req) => {
   });
 });
 
-console.log('✅ WebSocket server running on ws://localhost:8080');
+console.log('✅ Server running on ws://0.0.0.0:8080');
 console.log('🎉 Ready for calls!');
