@@ -34,6 +34,12 @@ wss.on('connection', (ws) => {
 
   ws.on('message', (message) => {
     try {
+      // Проверяем, что сообщение — строка
+      if (typeof message !== 'string') {
+        console.log('Received non-string message (probably handshake), skipping');
+        return;
+      }
+      
       const data = JSON.parse(message);
       console.log('📨 Received:', data.type);
 
@@ -110,7 +116,7 @@ wss.on('connection', (ws) => {
       }
       
     } catch (e) {
-      console.error('Error:', e);
+      console.error('Error parsing message:', e);
     }
   });
 
