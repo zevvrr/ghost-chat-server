@@ -38,7 +38,6 @@ wss.on('connection', (ws) => {
       const data = JSON.parse(messageStr);
       console.log('📨 Received:', data.type);
 
-      // Регистрация
       if (data.type === 'register') {
         const { userId, password } = data;
         
@@ -54,11 +53,9 @@ wss.on('connection', (ws) => {
         ws.send(JSON.stringify({ type: 'registered', success: true, userId: userId }));
         ws.send(JSON.stringify({ type: 'contacts_list', contacts: users.get(userId).contacts }));
         
-        // Отправляем статус онлайн всем контактам
         broadcastStatus(userId);
       }
       
-      // Сообщение
       else if (data.type === 'message') {
         const { from, to, content, messageId } = data;
         const target = users.get(to);
@@ -79,7 +76,6 @@ wss.on('connection', (ws) => {
         }
       }
       
-      // Добавить контакт
       else if (data.type === 'add_contact') {
         const { userId, contactId } = data;
         const user = users.get(userId);
@@ -89,8 +85,6 @@ wss.on('connection', (ws) => {
           ws.send(JSON.stringify({ type: 'contact_added_success', contact: contactId }));
         }
       }
-      
-      // === ЗВОНКИ ===
       
       else if (data.type === 'call_request') {
         const { from, to } = data;
@@ -122,7 +116,6 @@ wss.on('connection', (ws) => {
       const user = users.get(currentUserId);
       if (user) user.socket = null;
       
-      // Отправляем статус офлайн всем контактам
       broadcastStatus(currentUserId);
     }
   });
