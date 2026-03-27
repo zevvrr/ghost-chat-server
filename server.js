@@ -34,13 +34,9 @@ wss.on('connection', (ws) => {
 
   ws.on('message', (message) => {
     try {
-      // Проверяем, что сообщение — строка
-      if (typeof message !== 'string') {
-        console.log('Received non-string message (probably handshake), skipping');
-        return;
-      }
-      
-      const data = JSON.parse(message);
+      // Преобразуем буфер в строку
+      const messageStr = message.toString();
+      const data = JSON.parse(messageStr);
       console.log('📨 Received:', data.type);
 
       // Регистрация
@@ -70,13 +66,15 @@ wss.on('connection', (ws) => {
           target.socket.send(JSON.stringify({
             type: 'message', from, content, messageId, timestamp: Date.now()
           }));
-          console.log(`📨 Message: ${from} → ${to}`);
+          console.log(`📨 Message: ${from} → ${to}: ${content}`);
           
           setTimeout(() => {
             if (target.socket?.readyState === WebSocket.OPEN) {
               target.socket.send(JSON.stringify({ type: 'delete_message', messageId }));
             }
           }, 60000);
+        } else {
+          console.log(`❌ User ${to} offline`);
         }
       }
       
@@ -93,7 +91,6 @@ wss.on('connection', (ws) => {
       
       // === ЗВОНКИ ===
       
-      // Запрос звонка
       else if (data.type === 'call_request') {
         const { from, to } = data;
         const roomId = crypto.randomBytes(8).toString('hex');
@@ -103,13 +100,11 @@ wss.on('connection', (ws) => {
         console.log(`📞 Call: ${from} → ${to}, room: ${roomId}`);
       }
       
-      // WebRTC сигнал
       else if (data.type === 'webrtc_signal') {
         const { to, signal, roomId } = data;
         sendToUser(to, { type: 'webrtc_signal', from: currentUserId, signal, roomId });
       }
       
-      // Завершить звонок
       else if (data.type === 'end_call') {
         const { roomId } = data;
         console.log(`📞 Call ended: ${roomId}`);
