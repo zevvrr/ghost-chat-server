@@ -34,7 +34,6 @@ wss.on('connection', (ws) => {
 
   ws.on('message', (message) => {
     try {
-      // Преобразуем буфер в строку
       const messageStr = message.toString();
       const data = JSON.parse(messageStr);
       console.log('📨 Received:', data.type);
@@ -54,6 +53,8 @@ wss.on('connection', (ws) => {
         
         ws.send(JSON.stringify({ type: 'registered', success: true, userId: userId }));
         ws.send(JSON.stringify({ type: 'contacts_list', contacts: users.get(userId).contacts }));
+        
+        // Отправляем статус онлайн всем контактам
         broadcastStatus(userId);
       }
       
@@ -120,6 +121,8 @@ wss.on('connection', (ws) => {
       console.log(`👋 User disconnected: ${currentUserId}`);
       const user = users.get(currentUserId);
       if (user) user.socket = null;
+      
+      // Отправляем статус офлайн всем контактам
       broadcastStatus(currentUserId);
     }
   });
