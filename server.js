@@ -5,7 +5,6 @@ const wss = new WebSocket.Server({ port: 8080 });
 const users = new Map();
 
 console.log('🔒 VeilChat Server started on ws://0.0.0.0:8080');
-console.log('📝 Features: messages, disappearing messages, WebRTC calls');
 
 function sendToUser(userId, data) {
   const user = users.get(userId);
@@ -34,10 +33,10 @@ wss.on('connection', (ws) => {
 
   ws.on('message', (message) => {
     try {
-      const messageStr = message.toString();
-      const data = JSON.parse(messageStr);
+      const data = JSON.parse(message.toString());
       console.log('📨 Received:', data.type);
 
+      // Регистрация
       if (data.type === 'register') {
         const { userId, password } = data;
         
@@ -53,9 +52,11 @@ wss.on('connection', (ws) => {
         ws.send(JSON.stringify({ type: 'registered', success: true, userId: userId }));
         ws.send(JSON.stringify({ type: 'contacts_list', contacts: users.get(userId).contacts }));
         
+        // Сообщаем контактам, что я онлайн
         broadcastStatus(userId);
       }
       
+      // Сообщение
       else if (data.type === 'message') {
         const { from, to, content, messageId } = data;
         const target = users.get(to);
@@ -71,11 +72,10 @@ wss.on('connection', (ws) => {
               target.socket.send(JSON.stringify({ type: 'delete_message', messageId }));
             }
           }, 60000);
-        } else {
-          console.log(`❌ User ${to} offline`);
         }
       }
       
+      // Добавить контакт
       else if (data.type === 'add_contact') {
         const { userId, contactId } = data;
         const user = users.get(userId);
@@ -83,13 +83,36 @@ wss.on('connection', (ws) => {
           user.contacts.push(contactId);
           console.log(`📞 ${userId} added contact: ${contactId}`);
           ws.send(JSON.stringify({ type: 'contact_added_success', contact: contactId }));
+          
+          // Отправляем статус нового контакта
+          const contact = users.get(contactId);
+          if (contact) {
+            ws.send(JSON.stringify({
+              type: 'status',
+              userId: contactId,
+              online: contact.socket?.readyState === WebSocket.OPEN
+            }));
+          }
         }
       }
       
+      // Запрос статуса
+      else if (data.type === 'get_status') {
+        const { userId } = data;
+        const user = users.get(userId);
+        if (user) {
+          ws.send(JSON.stringify({
+            type: 'status',
+            userId: userId,
+            online: user.socket?.readyState === WebSocket.OPEN
+          }));
+        }
+      }
+      
+      // Звонки
       else if (data.type === 'call_request') {
         const { from, to } = data;
         const roomId = crypto.randomBytes(8).toString('hex');
-        
         sendToUser(to, { type: 'incoming_call', from: from, roomId: roomId });
         sendToUser(from, { type: 'call_initialized', roomId: roomId });
         console.log(`📞 Call: ${from} → ${to}, room: ${roomId}`);
@@ -101,12 +124,11 @@ wss.on('connection', (ws) => {
       }
       
       else if (data.type === 'end_call') {
-        const { roomId } = data;
-        console.log(`📞 Call ended: ${roomId}`);
+        console.log(`📞 Call ended`);
       }
       
     } catch (e) {
-      console.error('Error parsing message:', e);
+      console.error('Error:', e);
     }
   });
 
@@ -115,11 +137,9 @@ wss.on('connection', (ws) => {
       console.log(`👋 User disconnected: ${currentUserId}`);
       const user = users.get(currentUserId);
       if (user) user.socket = null;
-      
       broadcastStatus(currentUserId);
     }
   });
 });
 
 console.log('✅ Server running on ws://0.0.0.0:8080');
-console.log('🎉 Ready for calls!');
