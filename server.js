@@ -1,17 +1,16 @@
 const WebSocket = require('ws');
 const crypto = require('crypto');
 const { Pool } = require('pg');
+const bcrypt = require('bcrypt');
 
 const wss = new WebSocket.Server({ port: 8080 });
-const users = new Map(); // только для онлайн-статуса
+const users = new Map();
 
-// Подключение к PostgreSQL
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
   ssl: { rejectUnauthorized: false }
 });
 
-// Создаём таблицу
 pool.query(`
   CREATE TABLE IF NOT EXISTS users (
     id TEXT PRIMARY KEY,
@@ -20,7 +19,6 @@ pool.query(`
   )
 `).catch(e => console.error('Table error:', e));
 
-// Загрузка пользователей при старте
 async function loadAllUsers() {
   const res = await pool.query('SELECT id, password, contacts FROM users');
   for (let row of res.rows) {
@@ -33,7 +31,6 @@ async function loadAllUsers() {
   console.log(`📦 Loaded ${users.size} users from DB`);
 }
 
-// Сохранение в БД
 async function saveUserToDB(userId, password, contacts) {
   await pool.query(
     'INSERT INTO users (id, password, contacts) VALUES ($1, $2, $3) ON CONFLICT (id) DO UPDATE SET password = $2, contacts = $3',
@@ -79,11 +76,18 @@ wss.on('connection', (ws) => {
         const { userId, password } = data;
         
         if (!users.has(userId)) {
-          users.set(userId, { password, socket: ws, contacts: [] });
-          await saveUserToDB(userId, password, []);
+          const hashedPassword = await bcrypt.hash(password, 10);
+          users.set(userId, { password: hashedPassword, socket: ws, contacts: [] });
+          await saveUserToDB(userId, hashedPassword, []);
           console.log(`✅ New: ${userId}`);
         } else {
-          users.get(userId).socket = ws;
+          const user = users.get(userId);
+          const isValid = await bcrypt.compare(password, user.password);
+          if (!isValid) {
+            ws.send(JSON.stringify({ type: 'error', message: 'Invalid password' }));
+            return;
+          }
+          user.socket = ws;
           console.log(`🔄 Reconnected: ${userId}`);
         }
         currentUserId = userId;
@@ -91,7 +95,6 @@ wss.on('connection', (ws) => {
         ws.send(JSON.stringify({ type: 'registered', success: true }));
         ws.send(JSON.stringify({ type: 'contacts_list', contacts: users.get(userId).contacts }));
         
-        // Отправляем статусы контактов
         for (let contact of users.get(userId).contacts) {
           const c = users.get(contact);
           if (c) {
