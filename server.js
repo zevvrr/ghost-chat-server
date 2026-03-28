@@ -1,45 +1,53 @@
 const WebSocket = require('ws');
 const crypto = require('crypto');
-const fs = require('fs');
+const { Pool } = require('pg');
 
 const wss = new WebSocket.Server({ port: 8080 });
-const users = new Map();
-const DATA_FILE = './data/users.json';
+const users = new Map(); // только для онлайн-статуса
 
-// Загрузка пользователей
-function loadUsers() {
-  if (!fs.existsSync('./data')) fs.mkdirSync('./data');
-  if (fs.existsSync(DATA_FILE)) {
-    const data = fs.readFileSync(DATA_FILE);
-    const saved = JSON.parse(data);
-    for (let [id, info] of Object.entries(saved)) {
-      users.set(id, { ...info, socket: null });
-    }
-    console.log(`📦 Loaded ${users.size} users from file`);
+// Подключение к PostgreSQL
+const pool = new Pool({
+  connectionString: process.env.DATABASE_URL,
+  ssl: { rejectUnauthorized: false }
+});
+
+// Создаём таблицу
+pool.query(`
+  CREATE TABLE IF NOT EXISTS users (
+    id TEXT PRIMARY KEY,
+    password TEXT NOT NULL,
+    contacts TEXT[] DEFAULT '{}'
+  )
+`).catch(e => console.error('Table error:', e));
+
+// Загрузка пользователей при старте
+async function loadAllUsers() {
+  const res = await pool.query('SELECT id, password, contacts FROM users');
+  for (let row of res.rows) {
+    users.set(row.id, {
+      password: row.password,
+      contacts: row.contacts,
+      socket: null
+    });
   }
+  console.log(`📦 Loaded ${users.size} users from DB`);
 }
 
-// Сохранение пользователей
-function saveUsers() {
-  const toSave = {};
-  for (let [id, info] of users) {
-    toSave[id] = { password: info.password, contacts: info.contacts };
-  }
-  fs.writeFileSync(DATA_FILE, JSON.stringify(toSave, null, 2));
-  console.log(`💾 Saved ${users.size} users to file`);
+// Сохранение в БД
+async function saveUserToDB(userId, password, contacts) {
+  await pool.query(
+    'INSERT INTO users (id, password, contacts) VALUES ($1, $2, $3) ON CONFLICT (id) DO UPDATE SET password = $2, contacts = $3',
+    [userId, password, contacts]
+  );
 }
 
-// Сохраняем каждые 10 секунд
-setInterval(saveUsers, 10000);
-process.on('SIGINT', () => { saveUsers(); process.exit(); });
+loadAllUsers();
 
-loadUsers();
-
-console.log('🔒 VeilChat Server started on ws://0.0.0.0:8080');
+console.log('🔒 VeilChat Server started');
 
 function sendToUser(userId, data) {
   const user = users.get(userId);
-  if (user && user.socket && user.socket.readyState === WebSocket.OPEN) {
+  if (user && user.socket?.readyState === WebSocket.OPEN) {
     user.socket.send(JSON.stringify(data));
     return true;
   }
@@ -49,8 +57,8 @@ function sendToUser(userId, data) {
 function broadcastStatus(userId) {
   const user = users.get(userId);
   if (!user) return;
-  user.contacts.forEach(contactNick => {
-    sendToUser(contactNick, {
+  user.contacts.forEach(contact => {
+    sendToUser(contact, {
       type: 'status',
       userId: userId,
       online: user.socket?.readyState === WebSocket.OPEN
@@ -60,28 +68,39 @@ function broadcastStatus(userId) {
 
 wss.on('connection', (ws) => {
   let currentUserId = null;
-  console.log('📱 New client connected');
+  console.log('📱 New client');
 
-  ws.on('message', (message) => {
+  ws.on('message', async (msg) => {
     try {
-      const data = JSON.parse(message.toString());
-      console.log('📨 Received:', data.type);
+      const data = JSON.parse(msg.toString());
+      console.log('📨', data.type);
 
       if (data.type === 'register') {
         const { userId, password } = data;
         
         if (!users.has(userId)) {
           users.set(userId, { password, socket: ws, contacts: [] });
-          console.log(`✅ New user: ${userId}`);
-          saveUsers();
+          await saveUserToDB(userId, password, []);
+          console.log(`✅ New: ${userId}`);
         } else {
           users.get(userId).socket = ws;
-          console.log(`🔄 User reconnected: ${userId}`);
+          console.log(`🔄 Reconnected: ${userId}`);
         }
         currentUserId = userId;
         
-        ws.send(JSON.stringify({ type: 'registered', success: true, userId: userId }));
+        ws.send(JSON.stringify({ type: 'registered', success: true }));
         ws.send(JSON.stringify({ type: 'contacts_list', contacts: users.get(userId).contacts }));
+        
+        // Отправляем статусы контактов
+        for (let contact of users.get(userId).contacts) {
+          const c = users.get(contact);
+          if (c) {
+            ws.send(JSON.stringify({
+              type: 'status', userId: contact,
+              online: c.socket?.readyState === WebSocket.OPEN
+            }));
+          }
+        }
         
         broadcastStatus(userId);
       }
@@ -89,13 +108,11 @@ wss.on('connection', (ws) => {
       else if (data.type === 'message') {
         const { from, to, content, messageId } = data;
         const target = users.get(to);
-        
-        if (target && target.socket?.readyState === WebSocket.OPEN) {
+        if (target?.socket?.readyState === WebSocket.OPEN) {
           target.socket.send(JSON.stringify({
             type: 'message', from, content, messageId, timestamp: Date.now()
           }));
-          console.log(`📨 Message: ${from} → ${to}: ${content}`);
-          
+          console.log(`📨 ${from} → ${to}`);
           setTimeout(() => {
             if (target.socket?.readyState === WebSocket.OPEN) {
               target.socket.send(JSON.stringify({ type: 'delete_message', messageId }));
@@ -109,39 +126,26 @@ wss.on('connection', (ws) => {
         const user = users.get(userId);
         if (user && !user.contacts.includes(contactId)) {
           user.contacts.push(contactId);
-          console.log(`📞 ${userId} added contact: ${contactId}`);
+          await saveUserToDB(userId, user.password, user.contacts);
+          console.log(`📞 ${userId} added ${contactId}`);
           ws.send(JSON.stringify({ type: 'contact_added_success', contact: contactId }));
-          saveUsers();
           
           const contact = users.get(contactId);
           if (contact) {
             ws.send(JSON.stringify({
-              type: 'status',
-              userId: contactId,
+              type: 'status', userId: contactId,
               online: contact.socket?.readyState === WebSocket.OPEN
             }));
           }
         }
       }
       
-      else if (data.type === 'get_status') {
-        const { userId } = data;
-        const user = users.get(userId);
-        if (user) {
-          ws.send(JSON.stringify({
-            type: 'status',
-            userId: userId,
-            online: user.socket?.readyState === WebSocket.OPEN
-          }));
-        }
-      }
-      
       else if (data.type === 'call_request') {
         const { from, to } = data;
         const roomId = crypto.randomBytes(8).toString('hex');
-        sendToUser(to, { type: 'incoming_call', from: from, roomId: roomId });
-        sendToUser(from, { type: 'call_initialized', roomId: roomId });
-        console.log(`📞 Call: ${from} → ${to}, room: ${roomId}`);
+        sendToUser(to, { type: 'incoming_call', from, roomId });
+        sendToUser(from, { type: 'call_initialized', roomId });
+        console.log(`📞 Call: ${from} → ${to}`);
       }
       
       else if (data.type === 'webrtc_signal') {
@@ -160,7 +164,7 @@ wss.on('connection', (ws) => {
 
   ws.on('close', () => {
     if (currentUserId) {
-      console.log(`👋 User disconnected: ${currentUserId}`);
+      console.log(`👋 Disconnected: ${currentUserId}`);
       const user = users.get(currentUserId);
       if (user) user.socket = null;
       broadcastStatus(currentUserId);
@@ -168,4 +172,4 @@ wss.on('connection', (ws) => {
   });
 });
 
-console.log('✅ Server running on ws://0.0.0.0:8080');
+console.log('✅ Server ready');
