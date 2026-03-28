@@ -1,8 +1,39 @@
 const WebSocket = require('ws');
 const crypto = require('crypto');
+const fs = require('fs');
 
 const wss = new WebSocket.Server({ port: 8080 });
 const users = new Map();
+const DATA_FILE = './data/users.json';
+
+// Загрузка пользователей
+function loadUsers() {
+  if (!fs.existsSync('./data')) fs.mkdirSync('./data');
+  if (fs.existsSync(DATA_FILE)) {
+    const data = fs.readFileSync(DATA_FILE);
+    const saved = JSON.parse(data);
+    for (let [id, info] of Object.entries(saved)) {
+      users.set(id, { ...info, socket: null });
+    }
+    console.log(`📦 Loaded ${users.size} users from file`);
+  }
+}
+
+// Сохранение пользователей
+function saveUsers() {
+  const toSave = {};
+  for (let [id, info] of users) {
+    toSave[id] = { password: info.password, contacts: info.contacts };
+  }
+  fs.writeFileSync(DATA_FILE, JSON.stringify(toSave, null, 2));
+  console.log(`💾 Saved ${users.size} users to file`);
+}
+
+// Сохраняем каждые 10 секунд
+setInterval(saveUsers, 10000);
+process.on('SIGINT', () => { saveUsers(); process.exit(); });
+
+loadUsers();
 
 console.log('🔒 VeilChat Server started on ws://0.0.0.0:8080');
 
@@ -36,13 +67,13 @@ wss.on('connection', (ws) => {
       const data = JSON.parse(message.toString());
       console.log('📨 Received:', data.type);
 
-      // Регистрация
       if (data.type === 'register') {
         const { userId, password } = data;
         
         if (!users.has(userId)) {
           users.set(userId, { password, socket: ws, contacts: [] });
           console.log(`✅ New user: ${userId}`);
+          saveUsers();
         } else {
           users.get(userId).socket = ws;
           console.log(`🔄 User reconnected: ${userId}`);
@@ -52,11 +83,9 @@ wss.on('connection', (ws) => {
         ws.send(JSON.stringify({ type: 'registered', success: true, userId: userId }));
         ws.send(JSON.stringify({ type: 'contacts_list', contacts: users.get(userId).contacts }));
         
-        // Сообщаем контактам, что я онлайн
         broadcastStatus(userId);
       }
       
-      // Сообщение
       else if (data.type === 'message') {
         const { from, to, content, messageId } = data;
         const target = users.get(to);
@@ -75,7 +104,6 @@ wss.on('connection', (ws) => {
         }
       }
       
-      // Добавить контакт
       else if (data.type === 'add_contact') {
         const { userId, contactId } = data;
         const user = users.get(userId);
@@ -83,8 +111,8 @@ wss.on('connection', (ws) => {
           user.contacts.push(contactId);
           console.log(`📞 ${userId} added contact: ${contactId}`);
           ws.send(JSON.stringify({ type: 'contact_added_success', contact: contactId }));
+          saveUsers();
           
-          // Отправляем статус нового контакта
           const contact = users.get(contactId);
           if (contact) {
             ws.send(JSON.stringify({
@@ -96,7 +124,6 @@ wss.on('connection', (ws) => {
         }
       }
       
-      // Запрос статуса
       else if (data.type === 'get_status') {
         const { userId } = data;
         const user = users.get(userId);
@@ -109,7 +136,6 @@ wss.on('connection', (ws) => {
         }
       }
       
-      // Звонки
       else if (data.type === 'call_request') {
         const { from, to } = data;
         const roomId = crypto.randomBytes(8).toString('hex');
